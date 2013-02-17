@@ -1,23 +1,28 @@
 {
   "name": "Tab Auto Sync",
   "version": "2.0",
+  "manifest_version": 2,
   "description": "Auto sync tabs across computers and sessions.",
   "icons": {"16": "icon16.png",
 			"48": "icon48.png",
 			"128": "icon128.png"},
-  "background_page": "background.html",
   "browser_action": {
     "default_icon": "icon19.png",
     "default_title": "Turn Off"},
+  "background": {
+	"scripts": ["eventPage.js"],
+	"persistent": false
+  },
   "content_scripts": [
   {
     "matches": ["<all_urls>"],
-    "js": ["background.js"]
+    "js": ["eventPage.js"]
   }],
   "options_page": "options.html",
   "permissions": [
-    "tabs",
     "bookmarks",
-	"notifications"
+	"notifications",
+	"storage",
+	"tabs"
   ]
 }
