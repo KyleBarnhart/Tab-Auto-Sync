@@ -1,0 +1,22 @@
+body {
+	width: 200px;
+}
+
+select {
+	width: 180px;
+}
+
+.left {
+	float: left;
+	text-align: center;
+}
+
+.right {
+	float: right;
+	text-align: center;
+}
+
+.clear {
+	clear: both;
+	padding-top: 15px;
+}
