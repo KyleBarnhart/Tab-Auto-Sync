@@ -1,51 +1,30 @@
+<!DOCTYPE html>
 <html>
-<head><title>Tab Auto Sync Options</title></head>
-<script type="text/javascript" src="popup.js"></script>
+<head>
+	<title>Tab Auto Sync Settings</title>
+	<link rel="stylesheet" type="text/css" href="options.css">
+</head>
 
 <body>
-<h1>Tab Auto Sync Options</h1>
+	<div id="container">
+		<h1>Settings</h1>
+		<h2>Tab Auto Sync</h2>
+		
+		<h3>Profiles</h3>
+		<p>
+			Add: <input id="addProfile" type="text"> <input id="addProfileButton" type="submit" value="Add">
+		</p>
+		<table id="profiles">
+			<tr>
+				<th class="nameColumn">Name</th>
+				<th>Options</th>
+			</tr>
+		</table>
+		
+		<h3>Clear Sync Tabs</h3>
+		<input id="confirm" type="checkbox" name="clear" value="confirm"> Check to confirm <input id="clear" type="submit" value="Clear">
+	</div>
 
-<h3><u>Profiles</u></h3>
-<strong>Select Profile</strong><br />
-<div id="profileDiv">
-	
-</div>
-<button onclick="select_profile()">Select</button><br />
-<br />
-
-<strong>Delete Profile</strong><br />
-Delete the profile selected above.<br />
-<button onclick="delete_profile()">Delete</button><br />
-<br />
-
-
-<strong>New Profile</strong><br />
-<input type="text" id="profileName" /><br />
-<button onclick="add_profile()">Add</button>
-<br />
-<br />
-<span id="profileErrors"></span>
-<br />
-
-<h3><u>Startup</u></h3>
-<strong>Start Setting</strong><br />
-Always start with Tab Auto Sync on, off, or use last setting (as per on/off button).<br />
-<input name="start" type="radio" value="true">Always On<br />
-<input name="start" type="radio" value="false">Always Off<br />
-<input name="start" type="radio" value="last">Last Setting<br />
-<br />
-
-
-<strong>Startup Delay</strong><br />
-Longer delay gives Chrome more time to sync.<br />
-If you get the offline notification when you are online, please increase delay.<br />
-<input type="text" id="delay" /> Milliseconds (Default: 2000)
-
-<br />
-<br />
-<button onclick="save_options()">Save</button>
-
-<br />
-<span id="status"></span>
+	<script type="text/javascript" src="options.js"></script>
 </body>
 </html>

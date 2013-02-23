@@ -6,38 +6,72 @@
  * https://chrome.google.com/webstore/detail/tab-auto-sync/pglfmdocdcdahjhgcbpjmbglpeenmmef
 */
 
+var REMOVE_LISTENER_WAIT_DELAY = 25; // milliseconds
+
+// Selected profile data resides in %profilename#Windows
+var profileWindowKey = "DefaultWindows";
+
 // This is so that when the last open tab is closed,
 // it gets removed properly.
 // Hopefully a way can be found to remove this so that
 // Auto-Tab-Sync can be non-persistant
 var syncCopy = [];
+var isSyncCopyPopup = false;
  
 //
 // Show saved tabs when browser opens
 ///////////////////////////////////////////
-chrome.runtime.onStartup.addListener( start );
+chrome.runtime.onStartup.addListener( function() {
+	chrome.storage.local.get( "power", function( data ) {
+		if( ( ! data ) || data.power !== false ) {
+			start();
+		} else {
+			stop();
+		}
+	});
+});
 
 //
 // When updating Tab Auto Sync, migrate tabs and profiles from bookmark to storage
 ///////////////////////////////////////////
 chrome.runtime.onInstalled.addListener( function( details ) {
-	if( details.reason == "update" ) {
-		// Migrate tabs and profiles to storage
-		// todo
+	if( details.reason == "install" ) {
+		start();
+	}
+});
+
+//
+// Messeges
+///////////////////////////////////////////
+chrome.extension.onMessage.addListener( function( message ) {
+	if( message === "start" ) {
+		start();
 	}
 	
-	start();
+	if( message === "stop" ) {
+		stop();
+	}
+
+	// If profile was changed, save name, restart
+	if( message.profile ) {
+
+		// Remove storage change event
+		removeListenerWait(chrome.storage.onChanged, onSyncStorageChange, function() {
+		
+			// save local changes to storage
+			chrome.storage.local.set( { 'profile': message.profile }, start );
+		});
+	}
 });
 
 //
 // When the storage changes
 ///////////////////////////////////////////
 function onSyncStorageChange( callback ) {
-	chrome.storage.sync.get( "windows", function( syncWindows ) {
-		chrome.storage.local.get( "windows", function( localWindows ) {
-			
-			syncWindows = syncWindows.windows;
-			localWindows = localWindows.windows;
+	chrome.storage.sync.get( profileWindowKey, function( syncWindows ) {
+		chrome.storage.local.get( profileWindowKey, function( localWindows ) {
+			syncWindows = syncWindows[ profileWindowKey ];
+			localWindows = localWindows[ profileWindowKey ];
 			
 			if( Object.prototype.toString.call( syncWindows ) !== '[object Array]' ) {
 				syncWindows = [];
@@ -52,12 +86,14 @@ function onSyncStorageChange( callback ) {
 			
 			// Sync windows
 			updateWindows( syncWindows, localWindows, function() {
-			
+
 				// Remove storage change event
 				removeListenerWait(chrome.storage.onChanged, onSyncStorageChange, function() {
-				
+					var jsonObj = {};
+					jsonObj[ profileWindowKey ] = localWindows;
+					
 					// save local changes to storage
-					chrome.storage.local.set( { "windows": localWindows }, function() {
+					chrome.storage.local.set( jsonObj, function() {
 						
 						// Add storage change event
 						chrome.storage.onChanged.addListener( onSyncStorageChange );
@@ -76,48 +112,136 @@ function onSyncStorageChange( callback ) {
 }
 
 //
-// Setup local storage for auto-tab-sync
-/////////////////////////////////////
-function install( callback ) {
-	
-	// Create a computer guid if missing
-	chrome.storage.local.get( "localId", function( items ) {
-		if( ! items.localId ) {
-			chrome.storage.local.set( { "localId": GetGuid() } );
-		}
-	});
-	
-	if( callback && typeof( callback ) === "function" ) {
-		callback();
-	}
-}
-
-//
 // Start Tab Auto Sync
 // get synced data and open tabs
 ///////////////////////////////////////////
 function start() {
-	chrome.storage.sync.remove( "windows" ); // for debugging
+	//chrome.storage.sync.remove( profileWindowKey ); // for debugging
 
-	// Clear local storage then get sync storage
-	chrome.storage.local.remove( "windows", function() {
+	// Set icons
+	chrome.storage.local.set( { "power": true }, function() {
+		chrome.browserAction.setIcon( { "path": {'19': 'icon19.png', '38': 'icon38.png' } } );
+	});
 	
-		// Add initial content to storage
-		saveStartState(function () {
-			chrome.windows.getAll({ "populate": true }, function ( windowInitial ) {
+	// Set Title
+	chrome.browserAction.setTitle( { "title": "On" } );
+	
+	// Set profile name
+	chrome.storage.sync.get( "profiles", function( profiles ) {
+		chrome.storage.local.get( "profile", function( name ) {
+			profiles = profiles.profiles;
+			name = name.profile;
 			
-				// Get storage and sync
-				onSyncStorageChange( function() {
-					chrome.windows.getAll( { "populate": true }, function ( windowsAfter ) {
-						// When starting, if the first tab on the first window is the new tab
-						// and there is more than one window, close the first window
-						if( windowInitial[0].tabs[0].url === "chrome://newtab/" &&
-							( windowsAfter.length > 1 ||
-							  windowsAfter[0].tabs.length > 1 )	)
-						{
-							// Remove first tab
-							chrome.tabs.remove( windowInitial[0].tabs[0].id );
-						}
+			if( Object.prototype.toString.call( profiles ) !== '[object Array]' ) {
+				profiles = [];
+			}
+			
+			if( Object.prototype.toString.call( name ) !== '[object String]' ) {
+				name = "Default";
+			}
+			
+			// If not profiles are found, add name (Default)
+			if( profiles.length == 0 ) {
+				profiles.push( name );
+			}
+			
+			// Make sure current profle name is in array of profiles
+			var found = false;
+			for(var i = 0; i < profiles.length; i++ ) {
+				if( profiles[i] === name ) {
+					found = true;
+				}
+			}
+			
+			// If name is not is list of profiles
+			// change name to the first profile
+			if( ! found ) {
+				name = profiles[0];
+			}
+			
+			// Setup data location
+			profileWindowKey = name + "Windows";
+		
+			// Remove listener
+			removeListenerWait( chrome.storage.onChanged, onSyncStorageChange, function() {
+
+				// Save profile changes
+				// then start the initial sync
+				chrome.storage.local.set( { "profile": name }, function() {
+					chrome.storage.sync.set( { "profiles": profiles }, startSync );
+				});
+			});
+		});
+	});	
+}
+
+//
+// Initial sync at start
+///////////////////////////////////////////
+function startSync() {
+	// Clear local storage then get sync storage
+	chrome.storage.local.remove( profileWindowKey, function() {
+
+		chrome.windows.getAll( { "populate": true }, function( windows ) {
+			chrome.storage.sync.get( profileWindowKey, function( syncWindows ) {
+				chrome.storage.local.get( profileWindowKey, function( localWindows ) {
+				
+					// Fiddle with sync data to get an array of windows (could be empty)
+					if( syncWindows &&
+						syncWindows[ profileWindowKey ] &&
+						Object.prototype.toString.call( syncWindows[ profileWindowKey ]) === '[object Array]' )
+					{
+						syncWindows = syncWindows[ profileWindowKey ];
+					} else {
+						syncWindows = [];
+					}
+					
+					// Fiddle with local data to get an array of windows (could be empty)
+					if( localWindows &&
+						localWindows[ profileWindowKey ] &&
+						Object.prototype.toString.call( localWindows[ profileWindowKey ] ) === '[object Array]' )
+					{
+						localWindows = localWindows[ profileWindowKey ];
+					} else {
+						localWindows = [];
+					}
+					
+					// Stop tab and windows events
+					removeTabEvents();
+					
+					// Sync windows
+					updateWindows( syncWindows, localWindows, function() {
+						
+						// Remove storage change event
+						removeListenerWait(chrome.storage.onChanged, onSyncStorageChange, function() {
+							var jsonObj = {};
+							jsonObj[ profileWindowKey ] = localWindows;
+							
+							// save local changes to storage
+							chrome.storage.local.set( jsonObj, function() {
+								
+								var finish = function() {
+									// Add storage change event
+									chrome.storage.onChanged.addListener( onSyncStorageChange );
+									
+									// start events
+									addTabEvents();
+								};
+								
+								// When opening chrome and there is no opening content
+								// (one window, one tab, and it's the newtab)
+								// and there is content to sync, only then ignore the initial window
+								if( syncWindows.length > 0 &&
+									windows.length == 1 &&
+									windows[0].tabs.length == 1 &&
+									windows[0].tabs[0].url === "chrome://newtab/"
+								) {
+									chrome.windows.remove( windows[0].id, finish );
+								} else {
+									saveStartState( finish );
+								}
+							});
+						});
 					});
 				});
 			});
@@ -126,17 +250,31 @@ function start() {
 }
 
 //
+// Turn off tab auto sync
+///////////////////////////////////////////
+function stop() {
+	// Stop tab and windows events
+	removeTabEvents();
+	
+	// Remove storage change event
+	chrome.storage.onChanged.removeListener( onSyncStorageChange );
+	
+	// Set icons
+	chrome.storage.local.set( { "power": false }, function() {
+		chrome.browserAction.setIcon( { "path": {'19': 'icon19grey.png', '38': 'icon38grey.png' } } );
+	});
+	
+	// Set title 
+	chrome.browserAction.setTitle( { "title": "Off" } );
+}
+
+//
 // Create all missing windows and tabs
 ///////////////////////////////////////////
 function updateWindows( syncWindows, localWindows, callback ) {
-	var missingWindows = [];
-	var removeWindows = [];
 	
-	for( var i = 0; i < syncWindows.length; i++ ) {
-		if( ! getWindowByGuid( localWindows, syncWindows[i].guid ) ) {
-			missingWindows.push( syncWindows[i] );
-		}
-	}
+	// Need both id and guid
+	var removeWindows = [];
 
 	// Create list of windows to remove
 	for( var i = 0; i < localWindows.length; i++) {
@@ -144,46 +282,24 @@ function updateWindows( syncWindows, localWindows, callback ) {
 			removeWindows.push( localWindows[i] );
 		}
 	}
-	
-	// Recursively create missing windows
-	createWindow( localWindows, missingWindows, 0, function () {
-		removeWindow( localWindows, removeWindows, 0, function () {
-			updateTabs( syncWindows, localWindows, 0, callback );
+
+	// Recursively remove and update windows
+	updateWindow( localWindows, syncWindows, 0, function() {
+		removeWindow( localWindows, removeWindows, 0, function() {
+			if( callback && typeof( callback ) === "function" ) {
+				callback();
+			}
 		});
 	});
 }
 
 //
-// Return true if window is valid
-///////////////////////////////////////////
-function validateWindow( window ) {
-	
-	// Assert window exists
-	if( ! window )
-		return false;
-	
-	// Assert tabs exist
-	if( ! window.tabs )
-		return false;
-	
-	// Assert tabs is an array
-	if( Object.prototype.toString.call( window.tabs ) !== '[object Array]' )
-		return false;
-	
-	// Assert at least one tab
-	if( window.tabs.length < 1 )
-		return false;
-	
-	return true;
-}
-
-//
 // Create a new window
 ///////////////////////////////////////////
-function createWindow( localWindows, missingWindows, index, callback ) {
+function updateWindow( localWindows, syncWindows, index, callback ) {
 
 	// If all windows have been created, finish and callback
-	if( missingWindows.length <= index &&
+	if( syncWindows.length <= index &&
 		callback &&
 		typeof( callback ) === "function" )
 	{
@@ -191,69 +307,76 @@ function createWindow( localWindows, missingWindows, index, callback ) {
 		return;
 	}
 	
-	var window = missingWindows[index];
+	var sWin = syncWindows[index];
+	var lWin = getWindowByGuid( localWindows, sWin.guid );
 	
 	// Window properties
-	var createData = {};
+	var props = {};
 	
 	// If the window is horizontally on screen, set the left and width
-	if( window.left &&
-		window.width &&
-		window.left < 1 &&
-		window.left + window.width > 0 )
+	if( sWin.left &&
+		sWin.width &&
+		sWin.left < 1 &&
+		sWin.left + sWin.width > 0 )
 	{
-		createData.left = Math.round( window.left * screen.width );
-		createData.width = Math.round( window.width * screen.width );
+		props.left = Math.round( sWin.left * screen.width );
+		props.width = Math.round( sWin.width * screen.width );
 	}
 	
 	// If the window is vertically on screen, set the top and height
-	if( window.top &&
-		window.height &&
-		window.top < 1 &&
-		window.top + window.height > 0 )
+	if( sWin.top &&
+		sWin.height &&
+		sWin.top < 1 &&
+		sWin.top + sWin.height > 0 )
 	{
-		createData.top = Math.round( window.top * screen.height );
-		createData.height = Math.round( window.height * screen.height );
+		props.top = Math.round( sWin.top * screen.height );
+		props.height = Math.round( sWin.height * screen.height );
 	}
 	
-	// Type property
-	if( window.type )
-		createData.type = window.type;
-	
-	// Create window
-	chrome.windows.create( createData, function( currentWindow ) {
-
-		// Add window to local storage
-		localWindows.push( { "id": currentWindow.id, "guid": window.guid, "tabs": [] } );
-
-		// Get window from local storage
-		var lWin = getWindowById( localWindows, currentWindow.id );
+	// If window doesn't exist, create it
+	if( ! lWin ) {
+		// Create properties
+		if( sWin.type )
+			props.type = sWin.type;
 		
-		// Sort tabs by index number
-		window.tabs.sort( function( a, b ) {
-			return a.index - b.index;
-		});
-		
-		// Create missing tabs
-		createTab( lWin, window.tabs, 0, function() {
-			var tabId = -1;
-
-			// Find leftmost tab (newtab)
-			for( var i = 0; i < currentWindow.tabs.length; i++ ) {
-				if( currentWindow.tabs[i].index == 0 ) {
-					tabId = currentWindow.tabs[i].id;
-					break;
-				}
-			}
+		if( sWin.incognito )
+			props.incognito = sWin.incognito;
 			
-			// Remove leftmost tab (newtab)
-			chrome.tabs.remove( tabId, function() {
+		// Create window
+		chrome.windows.create( props, function( newWindow ) {
+			chrome.windows.get( newWindow.id, { "populate": true }, function( window ) {
+				lWin = { "id": newWindow.id, "guid": sWin.guid, "tabs": [] };
 
-				// Create next window
-				createWindow( localWindows, missingWindows, index + 1, callback );
+				// Add window to local storage
+				localWindows.push( lWin );
+				
+				// Update tabs
+				updateTabs( sWin, lWin, function() {
+					
+					// Remove first tab (popups might have no tabs)
+					if( window.tabs.length > 0 ) {
+						chrome.tabs.remove( window.tabs[0].id, function() {
+							// Update next window
+							updateWindow( localWindows, syncWindows, index + 1, callback );
+						});
+					} else {
+						// Update next window
+						updateWindow( localWindows, syncWindows, index + 1, callback );
+					}
+				});
 			});
 		});
-	});
+	
+	// If window does exist, update properties
+	} else {
+		chrome.windows.update( lWin.id, props, function( window ) {
+			updateTabs( sWin, lWin, function() {
+				
+				// Update next window
+				updateWindow( localWindows, syncWindows, index + 1, callback );
+			});
+		});
+	}
 }
 
 //
@@ -286,48 +409,32 @@ function removeWindow( localWindows, removeWindows, index, callback ) {
 //
 // Create all the tabs for the window
 ///////////////////////////////////////////
-function updateTabs( syncWindows, localWindows, index, callback ) {
+function updateTabs( syncWindow, localWindow, callback ) {
 	
-	// If all windows have been checked, finish and callback
-	if( syncWindows.length <= index &&
-		callback &&
-		typeof( callback ) === "function" )
-	{
-		callback();
-		return;
-	}
-	
-	var missingTabs = [];
+	// Need both id and guid
 	var removeTabs = [];
 	
-	var syncTabs = syncWindows[index].tabs;
-	var localWindow = getWindowByGuid( localWindows, syncWindows[index].guid );
+	var sTabs = syncWindow.tabs;
+	var lTabs = localWindow.tabs;
 	
 	// Sort tabs by index number
-	syncTabs.sort( function( a, b ) {
+	sTabs.sort( function( a, b ) {
 		return a.index - b.index;
 	});
-	
-	// Create list of missing tabs
-	for( var i = 0; i < syncTabs.length; i++ ) {
-		if( ! getWindowByGuid( localWindow.tabs, syncTabs[i].guid ) ) {
-			missingTabs.push( syncTabs[i] );
-		}
-	}
 
 	// Create list of tabs to remove
-	for( var i = 0; i < localWindow.tabs.length; i++) {
-		if( ! getWindowByGuid( syncTabs, localWindow.tabs[i].guid ) ) {
-			removeTabs.push( localWindow.tabs[i] );
+	for( var i = 0; i < lTabs.length; i++) {
+		if( ! getTabByGuid( sTabs, lTabs[i].guid ) ) {
+			removeTabs.push( lTabs[i] );
 		}
 	}
 	
 	// Recursively create missing windows
-	createTab( localWindow, missingTabs, 0, function () {
-		removeTab( localWindow, removeTabs, 0, function () {
-			
-			// Check tabs on next window
-			updateTabs( syncWindows, localWindows, index + 1, callback );
+	updateTab( localWindow, sTabs, 0, function () {		
+		removeTab( localWindow, removeTabs, 0, function() {
+			if( callback && typeof( callback ) === "function" ) {
+				callback();
+			}
 		});
 	});
 }
@@ -335,10 +442,10 @@ function updateTabs( syncWindows, localWindows, index, callback ) {
 //
 // Create single tab
 ///////////////////////////////////////////
-function createTab( localWindow, missingTabs, index, callback ) {
+function updateTab( localWindow, syncTabs, index, callback ) {
 	
 	// If all tabs have been created, finish and callback
-	if( missingTabs.length <= index &&
+	if( syncTabs.length <= index &&
 		callback &&
 		typeof( callback ) === "function" )
 	{
@@ -346,32 +453,45 @@ function createTab( localWindow, missingTabs, index, callback ) {
 		return;
 	}
 
-	var tab = missingTabs[index];
+	var sTab = syncTabs[index];
+	var lTab = getTabByGuid( localWindow.tabs, sTab.guid );
 	
-	var createProperties = {};
-		
-	// Window ID
-	createProperties.windowId = localWindow.id;
+	var props = {};
 	
 	// URL
-	createProperties.url = tab.url;
+	props.url = sTab.url;
 	
 	// Active
-	createProperties.active = false;
-	if( tab.active )
-		createProperties.active = tab.active;
+	props.active = false;
+	if( sTab.active )
+		props.active = sTab.active;
 	
 	// Pinned tab
-	if( tab.pinned )
-		createProperties.pinned = tab.pinned;
+	if( sTab.pinned )
+		props.pinned = sTab.pinned;
 
-	// Create tab
-	chrome.tabs.create( createProperties, function( newTab ) {
-		localWindow.tabs.push( { "id": newTab.id, "guid": tab.guid } );
+	// Create tab if it does not exist
+	if( ! lTab ) {
+		// Window ID
+		props.windowId = localWindow.id;
 		
-		// Create next tab
-		createTab( localWindow, missingTabs, index + 1, callback );
-	});
+		chrome.tabs.create( props, function( tab ) {	
+
+			// Add tab to local storage
+			localWindow.tabs.push( { "id": tab.id, "guid": sTab.guid } );
+			
+			// Update next tab
+			updateTab( localWindow, syncTabs, index + 1, callback );
+		});
+	
+	// If tab exists update it
+	} else {
+		chrome.tabs.update( lTab.id, props, function( tab ) {
+			
+			// Update next tab
+			updateTab( localWindow, syncTabs, index + 1, callback );
+		});
+	}
 }
 
 //
@@ -415,11 +535,11 @@ function saveChangesToStorage( changeFunction, callback ) {
 	}
 	
 	// Get all windows
-	chrome.storage.sync.get( "windows", function( syncWindows ) {
-		chrome.storage.local.get( "windows", function( localWindows ) {
+	chrome.storage.sync.get( profileWindowKey, function( syncWindows ) {
+		chrome.storage.local.get( profileWindowKey, function( localWindows ) {
 			
-			syncWindows = syncWindows.windows;
-			localWindows = localWindows.windows;
+			syncWindows = syncWindows[ profileWindowKey ];
+			localWindows = localWindows[ profileWindowKey ];
 		
 			if( Object.prototype.toString.call( syncWindows ) !== '[object Array]' ) {
 				syncWindows = [];
@@ -428,21 +548,25 @@ function saveChangesToStorage( changeFunction, callback ) {
 			if( Object.prototype.toString.call( localWindows ) !== '[object Array]' ) {
 				localWindows = [];
 			}
-
+			
 			// Call the change function, pass objects in by reference
 			if( changeFunction && typeof( changeFunction ) === "function" ) {
 				changeFunction( syncWindows, localWindows, function() {
-				
+
 					// Remove listener
 					removeListenerWait( chrome.storage.onChanged, onSyncStorageChange, function() {
+						var jsonObj = {};
+						jsonObj[ profileWindowKey ] = localWindows;
 						
 						// Save windows
-						chrome.storage.local.set( { "windows": localWindows }, function() {
-							chrome.storage.sync.set( { "windows": syncWindows }, function() {
-								
+						chrome.storage.local.set( jsonObj, function() {
+							jsonObj[ profileWindowKey ] = syncWindows;
+							
+							chrome.storage.sync.set( jsonObj, function() {
+
 								// Add storage change event
 								chrome.storage.onChanged.addListener( onSyncStorageChange );
-								
+
 								finish();
 							});
 						});
@@ -459,275 +583,125 @@ function saveChangesToStorage( changeFunction, callback ) {
 // Browser Start Function
 // When browser opens, add content
 //////////////////////////////////////
-function saveStartState( callback ) {
-	saveChangesToStorage(function ( syncWindows, localWindows, callback2 ) {
-		
-		// If window doesn't exist, create it
+function saveStartState( callbackStart ) {	
+	// Wreate windows and tabs for storage
+	saveChangesToStorage(function ( syncWindows, localWindows, callbackStorage ) {	
 		chrome.windows.getAll({ "populate": true }, function ( windows ) {
-			
-			// For each window
-			for( var i = 0; i < windows.length; i++ ) {
-				var window = windows[i];
-
-				window.guid = GetGuid();
-				
-				var localWindow = { "id": window.id, "guid": window.guid, "tabs": [] };
-				
-				// Make position relative
-				window.top = window.top / screen.height;
-				window.left = window.left / screen.width;
-				window.width = window.width / screen.width;
-				window.height = window.height / screen.height;
-				
-				// Add tab information
-				for( var j = 0; j < window.tabs.length; j++ ) {
-					window.tabs[j].guid = GetGuid();
-					localWindow.tabs.push({ "id": window.tabs[j].id, "guid": window.tabs[j].guid });
-				}
-				
-				localWindows.push( localWindow );
-				syncWindows.push( window );
-				
-				if( callback2 && typeof( callback2 ) === "function" ) {
-					callback2();
-				}
-			}
+			saveStartIteration( syncWindows, localWindows, windows, 0, callbackStorage );
 		});
-	}, callback );
+	}, callbackStart );
+}
+// Doing this recursively will save storage access time
+function saveStartIteration( syncWindows, localWindows, openWindows, index, callback ) {
+	// If all windows have been removed, finish and callback
+	if( openWindows.length <= index &&
+		callback &&
+		typeof( callback ) === "function" )
+	{
+		callback();
+		return;
+	}
+	
+	var window = openWindows[index];
+	
+	// Save window and tabs
+	saveWindowsTabs( syncWindows, localWindows, openWindows[index], function() {
+		
+		// Save next window
+		saveStartIteration( syncWindows, localWindows, openWindows, index + 1, callback )
+	});
 }
 
 //
 // Tab Events
 //////////////////////////////////////
-function tabCreatedEvent( tab ) {	
+function genericUpdateEvent( windowId ) {
+	
+	// Updates and creates windows and tabs
 	saveChangesToStorage(function ( syncWindows, localWindows, callback ) {
-		// If window doesn't exist, create it
-		checkWindowExists( syncWindows, localWindows, tab.windowId, function() {
+	
+		// Get the window
+		chrome.windows.get(windowId, { "populate": true }, function ( window ) {
 			
-			// Get local and sync storage windows
-			var lWin = getWindowById( localWindows, tab.windowId );
-			var sWin = getWindowByGuid( syncWindows, lWin.guid );
-			
-			// Create tab in storage
-			tab.guid = GetGuid();
-
-			lWin.tabs.push( { "id": tab.id, "guid": tab.guid } );
-			sWin.tabs.push( tab );
-			
-			if( callback && typeof( callback ) === "function" ) {
-				callback();
-			}
+			// Save changes
+			saveWindowsTabs( syncWindows, localWindows, window, callback );
 		});
 	});
+}
+function tabCreatedEvent( tab ) {
+	genericUpdateEvent( tab.windowId );
 }
 function tabUpdatedEvent( tabId, changeInfo, tab ) {
-	// Only save tab after it finished loading.
-	if( changeInfo.status !== "loading") {
-		return;
+	if( changeInfo.status === "loading" ) {
+		genericUpdateEvent( tab.windowId );
 	}
-	
+}
+function tabMovedEvent( tabId, moveInfo ) {
+	genericUpdateEvent( moveInfo.windowId );
+}
+function tabDetachedEvent( tabId ) {
+	tabRemovedEvent( tabId, { "isWindowClosing": false } );
+}
+function tabAttachedEvent( tabId, attachInfo ) {
+	genericUpdateEvent( attachInfo.newWindowId );
+};
+function tabRemovedEvent( tabId, removeInfo ) {
 	saveChangesToStorage(function ( syncWindows, localWindows, callback ) {
-		
-		// If window doesn't exist, create it
-		checkWindowExists( syncWindows, localWindows, tab.windowId, function() {
-
-			// Get local and sync storage windows
-			var lWin = findWindowByTabId( localWindows, tabId );
-			var sWin = getWindowByGuid( syncWindows, lWin.guid );
-
-			// Get local and sync storage tabs
-			var lTab = getTabById( lWin.tabs, tabId );
-			var sTab = getTabByGuid( sWin.tabs, lTab.guid );
-
-			// Update tab in storage
-			sTab.pinned = tab.pinned;
-			sTab.url = tab.url;
-			
+		var finish = function() {
 			if( callback && typeof( callback ) === "function" ) {
 				callback();
 			}
-		});
-	});
-}
-function tabMovedEvent( tabId, moveInfo) {
-	
-	saveChangesToStorage(function ( syncWindows, localWindows, callback ) {
-	
-		// If window doesn't exist, create it
-		checkWindowExists( syncWindows, localWindows, moveInfo.windowId, function() {
-
-			// Get local and sync storage windows
-			var lWin = getWindowById( localWindows, moveInfo.windowId );
-			var sWin = getWindowByGuid( syncWindows, lWin.guid );
-
-			// Get window
-			chrome.windows.get(moveInfo.windowId, { "populate": true }, function ( window ) {
-
-				// Reset all index numbers in storage
-				for( var i = 0; i < window.tabs.length; i++) {
-					var lTab = getTabById( lWin.tabs, window.tabs[i].id );
-					var sTab = getTabByGuid( sWin.tabs, lTab.guid );
-
-					sTab.index = window.tabs[i].index;
-				}
-				
-				if( callback && typeof( callback ) === "function" ) {
-					callback();
-				}
-			});
-		});
-	});
-}
-function tabDetachedEvent( tabId ) {
-	saveChangesToStorage(function ( syncWindows, localWindows, callback ) {	
+		};
+		
 		var lWin = findWindowByTabId( localWindows, tabId );
-
+		var sWin = getWindowByGuid( syncWindows, lWin.guid );
+		
+		// Only remove tabs if the tab was closed, or if popup is true and window closing
+		// isWindowClosing is true if window was closed
+		// No callback mean no saving, fast remove setup does run
+		if( removeInfo.isWindowClosing && sWin.type === "normal" ) {
+			finish();
+			return;
+		}
+		
+		// Either an array of windows or array of tabs
+		var localContent;
+		var syncContent;
+		var contentId;
+		
 		// If the window is closing, then remove window
-		if( lWin.tabs.length === 1) {			
-			var winGuid = -1;
-
-			// Remove window from local storage
-			for( var i = 0; i < localWindows.length; i++ ) {
-				if( localWindows[i].id === lWin.id ) {
-					winGuid = localWindows[i].guid;
-					localWindows.splice(i, 1);
-					break;
-				}
-			}
-
-			// Remove window from sync storage
-			for( var i = 0; i < syncWindows.length; i++ ) {
-				if( syncWindows[i].guid === winGuid ) {
-					syncWindows.splice(i, 1);
-					break;
-				}
-			}
+		if( lWin.tabs.length === 1 ) {			
+			localContent = localWindows;
+			syncContent = syncWindows;
+			contentId = lWin.id;
 
 		// If it is just a tab, remove tab
 		} else {
-			var sWin = getWindowByGuid( syncWindows, lWin.guid );
-			var tabGuid = -1;
-			
-			// Remove tab from local storage
-			for( var i = 0; i < lWin.tabs.length; i++ ) {
-				if( lWin.tabs[i].id === tabId ) {
-					tabGuid = lWin.tabs[i].guid;
-					lWin.tabs.splice(i, 1);
-					break;
-				}
-			}
-
-			// Remove tab from sync storage
-			for( var i = 0; i < sWin.tabs.length; i++ ) {
-				if( sWin.tabs[i].guid === tabGuid ) {
-					sWin.tabs.splice(i, 1);
-					break;
-				}
-			}
+			localContent = lWin.tabs;
+			syncContent = sWin.tabs;
+			contentId = tabId;
 		}
-		
-		if( callback && typeof( callback ) === "function" ) {
-			callback();
-		}
-	});
-}
-function tabAttachedEvent( tabId, attachInfo ) {
-	chrome.tabs.get( tabId, function( tab ) {
-		saveChangesToStorage(function ( syncWindows, localWindows, callback ) {
-		
-			// If window doesn't exist, create it
-			checkWindowExists( syncWindows, localWindows, attachInfo.newWindowId, function() {
-
-				// Get local and sync storage windows
-				var lWin = getWindowById( localWindows, attachInfo.newWindowId );
-				var sWin = getWindowByGuid( syncWindows, lWin.guid );
-				
-				// Create tab in storage
-				tab.guid = GetGuid();
-				
-				lWin.tabs.push( { "id": tab.id, "guid": tab.guid } );
-				sWin.tabs.push( tab );
-				
-				// Make sure the index numbers are correct
-				chrome.windows.get(lWin.id, { "populate": true }, function ( window ) {
-
-					// Reset all index numbers in storage
-					for( var i = 0; i < window.tabs.length; i++) {
-						var lTab = getTabById( lWin.tabs, window.tabs[i].id );
-						var sTab = getTabByGuid( sWin.tabs, lTab.guid );
-
-						sTab.index = window.tabs[i].index;
-					}
-					
-					if( callback && typeof( callback ) === "function" ) {
-						callback();
-					}
-				});
-			});
-		});
-	});
-}
-function tabRemovedEvent( tabId, removeInfo ) {
-
-	// Only remove tabs if the tabs was closed
-	// isWindowClosing is true if window was closed
-	if( removeInfo.isWindowClosing ) {
-
-		// Setup fast remove if needed
-		setupOnRemovedEvent();
-		return;
-	}
 	
-	saveChangesToStorage(function ( syncWindows, localWindows, callback ) {	
-		var lWin = findWindowByTabId( localWindows, tabId );
+		var contentGuid = -1;
 
-		// If the window is closing, then remove window
-		if( lWin.tabs.length === 1) {			
-			var winGuid = -1;
-
-			// Remove window from local storage
-			for( var i = 0; i < localWindows.length; i++ ) {
-				if( localWindows[i].id === lWin.id ) {
-					winGuid = localWindows[i].guid;
-					localWindows.splice(i, 1);
-					break;
-				}
-			}
-
-			// Remove window from sync storage
-			for( var i = 0; i < syncWindows.length; i++ ) {
-				if( syncWindows[i].guid === winGuid ) {
-					syncWindows.splice(i, 1);
-					break;
-				}
-			}
-		
-		// If it is just a tab, remove tab
-		} else {
-			var sWin = getWindowByGuid( syncWindows, lWin.guid );
-			var tabGuid = -1;
-			
-			// Remove tab from local storage
-			for( var i = 0; i < lWin.tabs.length; i++ ) {
-				if( lWin.tabs[i].id === tabId ) {
-					tabGuid = lWin.tabs[i].guid;
-					lWin.tabs.splice(i, 1);
-					break;
-				}
-			}
-
-			// Remove tab from sync storage
-			for( var i = 0; i < sWin.tabs.length; i++ ) {
-				if( sWin.tabs[i].guid === tabGuid ) {
-					sWin.tabs.splice(i, 1);
-					break;
-				}
+		// Remove tab/window from local storage
+		for( var i = 0; i < localContent.length; i++ ) {
+			if( localContent[i].id === contentId ) {
+				contentGuid = localContent[i].guid;
+				localContent.splice(i, 1);
+				break;
 			}
 		}
 
-		if( callback && typeof( callback ) === "function" ) {
-			callback();
+		// Remove tab/window from sync storage
+		for( var i = 0; i < syncContent.length; i++ ) {
+			if( syncContent[i].guid === contentGuid ) {
+				syncContent.splice(i, 1);
+				break;
+			}
 		}
+
+		finish();
 	});
 }
 
@@ -736,46 +710,89 @@ function tabRemovedEvent( tabId, removeInfo ) {
 // and it is closed, act fast to clear sync storage
 /////////////////////////////////////////////////
 function tabRemovedLastEvent( tabId, removeInfo ) {
-	if( removeInfo.isWindowClosing )
+	if( removeInfo.isWindowClosing === true && isSyncCopyPopup === false )
 		return;
-
-	chrome.storage.sync.set( { "windows": syncCopy } );
+	
+	// Remove listener
+	// This is required because google instant will close the last tab
+	// firing the storage onChange event and closing Chrome.
+	removeListenerWait( chrome.storage.onChanged, onSyncStorageChange, function() {
+		var jsonObj = {};
+		jsonObj[ profileWindowKey ] = syncCopy;
+		
+		chrome.storage.sync.set( jsonObj );
+	});
 }
 
 //
 // Check if window exists, if it doesn't create it
+// Takes window instead of windowId to reduce chrome.windows.get calls
 ///////////////////////////////////////
-function checkWindowExists( syncWindows, localWindows, id, callback ) {
-	var finish = function() {
-		if( callback && typeof( callback ) === "function" )
-			callback();
-	};
+function saveWindowsTabs( syncWindows, localWindows, window, callback ) {
+	var lWin = getWindowById( localWindows, window.id );
+	var sWin;
+
+	// If window doesn't exist in storage create it
+	if( ! lWin ) {	
+		sWin = {};
+		sWin.id = window.id;
+		sWin.guid = GetGuid();
+		sWin.tabs = [];
+		
+		lWin = { "id": sWin.id, "guid": sWin.guid, "tabs": [] };
+		
+		// Save local and sync storage windows
+		localWindows.push( lWin );
+		syncWindows.push( sWin );
 	
-	for( var i = 0; i < localWindows.length; i++) {
-		if( localWindows[i].id === id ) {
-			finish();
-			return;
-		}
+	// If window exists
+	} else {
+		sWin = getWindowByGuid( syncWindows, lWin.guid );
 	}
 	
-	// If window doesn't exist, create it
-	chrome.windows.get(id, { "populate": false }, function ( window ) {
-		window.guid = GetGuid();
+	// Update window properties
+	sWin.focused = window.focused;
+	sWin.top = window.top / screen.height;
+	sWin.left = window.left / screen.width;
+	sWin.width = window.width / screen.width;
+	sWin.height = window.height / screen.height;
+	sWin.incognito = window.incognito;
+	sWin.type = window.type;
+	
+	// Update all tabs
+	for( var i = 0; i < window.tabs.length; i++ ) {
+		var tab = window.tabs[i];
 		
-		var localWindow = { "id": window.id, "guid": window.guid, "tabs": [] };
+		// Get tabs		
+		var lTab = getTabById( lWin.tabs, tab.id );
+		var sTab;
 		
-		// Make position relative
-		window.top = window.top / screen.height;
-		window.left = window.left / screen.width;
-		window.width = window.width / screen.width;
-		window.height = window.height / screen.height;
-		window.tabs = [];
+		// If tab doesn't exist create it
+		if( ! lTab ) {
+			sTab = {};
+			sTab.id = tab.id;
+			sTab.guid = GetGuid();
+			
+			lTab = { "id": sTab.id, "guid": sTab.guid };
+
+			lWin.tabs.push( lTab );
+			sWin.tabs.push( sTab );
+
+		// If tab exists
+		} else {
+			sTab = getTabByGuid( sWin.tabs, lTab.guid );
+		}
 		
-		localWindows.push( localWindow );
-		syncWindows.push( window );
-		
-		finish();
-	});
+		// Update tab properties
+		sTab.index = tab.index;
+		sTab.active = tab.active;
+		sTab.pinned = tab.pinned;
+		sTab.url = tab.url;
+	}
+	
+	if( callback && typeof( callback ) === "function" ) {
+		callback();
+	}
 }
 
 //
@@ -789,36 +806,50 @@ function addTabEvents() {
 	chrome.tabs.onAttached.addListener( tabAttachedEvent );
 	
 	setupOnRemovedEvent();
-	
-	//chrome.extension.onRequest.addListener( listener.request );
 }
 
 //
 // When there is only one open tab, setup remove tab event
 // for a fast action.
 ///////////////////////////////////////////////////////////
-function setupOnRemovedEvent() {	
+function setupOnRemovedEvent() {
 	chrome.windows.getAll( { "populate": true }, function( windows ) {
 		if( windows.length == 1 && windows[0].tabs.length == 1) {
-			// Get local and sync storage
-			chrome.storage.local.get("windows", function( localWindows ) {
-				chrome.storage.sync.get("windows", function( syncWindows ) {
-				
-					// Get local and sync storage windows
-					var lWin = getWindowById( localWindows.windows, windows[0].id );
 
+			// Get local and sync storage
+			chrome.storage.local.get(profileWindowKey, function( localWindows ) {
+				chrome.storage.sync.get(profileWindowKey, function( syncWindows ) {
+					localWindows = localWindows[ profileWindowKey ];
+					syncWindows = syncWindows[ profileWindowKey ];
+					
+					if( Object.prototype.toString.call( syncWindows ) !== '[object Array]' ) {
+						syncWindows = [];
+					}
+					
+					if( Object.prototype.toString.call( localWindows ) !== '[object Array]' ) {
+						localWindows = [];
+					}
+					
+					// Get local and sync storage windows
+					var lWin = getWindowById( localWindows, windows[0].id );
+					
 					// Find and remove open window from sync windows
-					for( var i = 0; i < syncWindows.windows.length; i++ ) {
-						if( syncWindows.windows[i].guid === lWin.guid ) {
-							syncWindows.windows.splice(i, 1);
+					for( var i = 0; i < syncWindows.length; i++ ) {
+						if( syncWindows[i].guid === lWin.guid ) {
+							syncWindows.splice(i, 1);
 							break;
 						}
 					}
 					
 					// This is what the sync storage would look like
 					// if the current (only) window is closed
-					syncCopy = syncWindows.windows;
+					syncCopy = syncWindows;
 					
+					isSyncCopyPopup = false
+					if( windows[0].type !== "normal" ) {
+						isSyncCopyPopup = true;
+					}
+
 					if( chrome.tabs.onRemoved.hasListener( tabRemovedEvent ) ) {
 						chrome.tabs.onRemoved.removeListener( tabRemovedEvent );
 					}
@@ -849,8 +880,6 @@ function removeTabEvents( lastTab ) {
 	chrome.tabs.onAttached.removeListener( tabAttachedEvent );
 	chrome.tabs.onRemoved.removeListener( tabRemovedEvent );
 	chrome.tabs.onRemoved.removeListener( tabRemovedLastEvent );
-	
-	//chrome.extension.onRequest.removeListener( listener.request );
 }
 
 //
@@ -910,14 +939,12 @@ function GetGuid() {
 /////////////////////////////////////////////
 function removeListenerWait( event, listenerFunction, callback ) {
 	event.removeListener( listenerFunction );
-	removeListenerWaitDelay( event, listenerFunction, callback );
-}
-function removeListenerWaitDelay( event, listenerFunction, callback ) {
-	// If the event still has the listener, try again in 100 ms
+	
+	// If the event still has the listener, try again in ms
 	while( event.hasListener( listenerFunction ) ) {
 		setTimeout( function() {
-			removeListenerWaitDelay( event, listenerFunction, callback );
-		}, 100);
+			removeListenerWait( event, listenerFunction, callback );
+		}, REMOVE_LISTENER_WAIT_DELAY);
 		
 		return;
 	}
